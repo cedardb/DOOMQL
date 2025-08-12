@@ -12,18 +12,6 @@ insert into config (player_move_speed, player_turn_speed) values (0.3, 0.2);
 DROP TABLE IF EXISTS map;
 CREATE TABLE map(x INT, y INT, tile CHAR);
 
--- PLAYER
-DROP TABLE IF EXISTS player;
-CREATE TABLE player(
-  id INT PRIMARY KEY GENERATED ALWAYS AS IDENTITY, 
-  x DOUBLE, 
-  y DOUBLE, 
-  dir DOUBLE, 
-  icon CHAR, 
-  name TEXT, 
-  score INT DEFAULT 0);
-
-
 -- INPUTS
 DROP TABLE IF EXISTS inputs;
 CREATE TABLE inputs(
@@ -32,33 +20,62 @@ CREATE TABLE inputs(
   timestamp TIMESTAMP DEFAULT NOW()
 );
 
--- BULLETS
-DROP TABLE IF EXISTS bullets;
-CREATE TABLE bullets(
-  id INT PRIMARY KEY GENERATED ALWAYS AS IDENTITY, 
-  x DOUBLE, 
-  y DOUBLE, 
-  dx DOUBLE, 
-  dy DOUBLE,
-   owner int references player(id));
-
--- COLLISIONS BETWEEN BULLETS AND PLAYERS
-DROP VIEW IF EXISTS collisions;
-CREATE OR REPLACE VIEW collisions AS 
-  SELECT b.id AS bullet_id,
-    b.owner as bullet_owner,
-    p.id AS player_id, 
-    p.x AS player_x, 
-    p.y AS player_y 
-  FROM bullets b, player p 
-  WHERE CAST(b.x AS INT) = CAST(p.x AS INT) 
-  AND CAST(b.y AS INT) = CAST(p.y AS INT)
-  AND b.owner != p.id; -- Ensure the bullet is not from the player being hit
-
-
 -- SETTINGS
 DROP TABLE IF EXISTS settings;
 CREATE TABLE settings(fov DOUBLE, step DOUBLE, max_steps INT, view_w INT, view_h INT);
 INSERT INTO settings VALUES (PI()/3, 0.1, 100, 128, 64);
 
+-- SPRITES
+CREATE TABLE IF NOT EXISTS sprites (
+  id SERIAL PRIMARY KEY,
+  name TEXT UNIQUE NOT NULL,
+  w INT NOT NULL,
+  h INT NOT NULL
+);
 
+
+-- Sprite pixels: (0,0) is top-left; ch=NULL or ch=' ' means transparent
+CREATE TABLE IF NOT EXISTS sprite_pixels (
+  sprite_id INT REFERENCES sprites(id),
+  sx INT NOT NULL,
+  sy INT NOT NULL,
+  ch TEXT,                              -- single char; NULL/' ' => transparent
+  PRIMARY KEY (sprite_id, sx, sy)
+);
+
+-- Generic MOBs (players, bullets, monsters, items, …)
+CREATE TABLE IF NOT EXISTS mobs (
+  id INT PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
+  kind TEXT NOT NULL,                   -- 'player', 'bullet', 'monster', ...
+  owner INT, -- NULL for neutral mobs
+  x DOUBLE PRECISION NOT NULL,
+  y DOUBLE PRECISION NOT NULL,
+  dir DOUBLE PRECISION DEFAULT 0,
+  world_w double default 1, -- width in world tiles
+  world_h double default 1, -- height in world tiles
+  name TEXT,
+  sprite_id INT REFERENCES sprites(id),
+  minimap_icon TEXT       -- single char/emoji for the minimap
+);
+
+-- Players
+CREATE TABLE IF NOT EXISTS players (
+  id INT REFERENCES mobs(id),
+  score INT DEFAULT 0,
+  hp INT DEFAULT 100,
+  ammo INT DEFAULT 10
+);
+
+-- COLLISIONS BETWEEN BULLETS AND PLAYERS
+CREATE OR REPLACE VIEW collisions AS 
+  SELECT m.id AS bullet_id,
+    m.owner as bullet_owner,
+    p.id AS player_id, 
+    p_m.x AS player_x, 
+    p_m.y AS player_y 
+  FROM mobs m, players p, mobs p_m
+  WHERE CAST(m.x AS INT) = CAST(p_m.x AS INT) 
+  AND CAST(m.y AS INT) = CAST(p_m.y AS INT)
+  AND m.kind = 'bullet'
+  AND p_m.id = p.id
+  AND m.owner != p.id; -- Ensure the bullet is not from the player being hit

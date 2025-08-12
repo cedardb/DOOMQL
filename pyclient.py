@@ -13,7 +13,7 @@ DB_PASSWORD = "postgres"
 DB_HOST = "chiletanne"
 DB_PORT = "5432"
 
-FRAME_INTERVAL = 0.03  # ~33 FPS
+FRAME_INTERVAL = 0.05  # ~20 FPS
 
 def getch(timeout=0.01):
     dr, _, _ = select.select([sys.stdin], [], [], timeout)
@@ -44,19 +44,21 @@ def connect_db():
     )
 
 def get_or_create_player(cur, name, icon):
-    cur.execute("SELECT id FROM player WHERE name = %s", (name,))
+    cur.execute("SELECT p.id FROM players p, mobs m WHERE p.id = m.id AND m.name = %s", (name,))
     row = cur.fetchone()
     if row:
         return row[0]
-    cur.execute("INSERT INTO player(x, y, dir, icon, name) VALUES (1, 1, 0, %s, %s) RETURNING id", (icon, name))
-    return cur.fetchone()[0]
+    cur.execute("INSERT INTO mobs(kind, x, y, dir, name, sprite_id, minimap_icon) VALUES ('player', 4, 4, 0, %s, 0, %s) RETURNING id", (name, icon))
+    id = cur.fetchone()[0]
+    cur.execute("INSERT INTO players(id) VALUES (%s)", (id,))
+    return id
 
 def read_state(cur, player_id):
-    cur.execute("SELECT x, y, dir FROM player WHERE id = %s", (player_id,))
+    cur.execute("SELECT m.x, m.y, m.dir FROM players p, mobs m WHERE p.id = m.id AND p.id = %s", (player_id,))
     return cur.fetchone()
 
 def read_metadata(cur, pid):
-    cur.execute("SELECT name, x, y, dir FROM player WHERE id = %s", (pid,))
+    cur.execute("SELECT m.name, m.x, m.y, m.dir FROM players p, mobs m WHERE p.id = m.id AND p.id = %s", (pid,))
     return cur.fetchone()  # returns (name, x, y, dir)
 
 def render_screen(cur, player_id):

@@ -3,12 +3,12 @@ WITH cols AS (
     SELECT pc.col FROM settings s, generate_series(0, s.view_w) as pc(col)
   )
   SELECT p.id as player_id, 
-    p.x AS player_x, 
-    p.y AS player_y,
+    m.x AS player_x, 
+    m.y AS player_y,
     c.col, 
-    (p.dir - s.fov/2.0 + s.fov * (c.col*1.0 / (s.view_w - 1))) AS angle 
-  FROM cols c, settings s, player p;
-
+    (m.dir - s.fov/2.0 + s.fov * (c.col*1.0 / (s.view_w - 1))) AS angle 
+  FROM cols c, settings s, players p, mobs m
+  WHERE p.id = m.id;
 -- A view for all tiles visible to a given player
 -- calculated using raycasting from each player's position
 CREATE OR REPLACE VIEW visible_tiles AS 
@@ -30,10 +30,11 @@ WITH RECURSIVE raytrace(player_id, col, step_count, fx, fy, angle, dist) AS (
       rt.fx + COS(rt.angle)*s.step as fx, 
       rt.fy + SIN(rt.angle)*s.step as fy, 
       rt.angle,
-      step_count * s.step * COS(rt.angle - p.dir) as dist
-    FROM raytrace rt, settings s, player p
+      step_count * s.step * COS(rt.angle - m.dir) as dist
+    FROM raytrace rt, settings s, players p, mobs m
     WHERE rt.step_count < s.max_steps 
       AND rt.player_id = p.id
+      AND m.id = p.id
       AND NOT EXISTS ( -- Culling rays that hit walls
         SELECT 1 
         FROM map m 
@@ -74,7 +75,7 @@ WITH
     GROUP BY player_id, vt.col
   ),
   distances AS (
-    select v.player_id,
+    select r.player_id,
       r.col,
       r.angle,
       coalesce(v.dist, s.max_steps * s.step) as dist
@@ -86,10 +87,11 @@ WITH
       d.col, 
       CASE WHEN d.dist <= 0 
         THEN s.view_h 
-        ELSE GREATEST(0, LEAST(s.view_h, CAST(s.view_h / (d.dist * COS(d.angle - p.dir)) AS INT))) 
+        ELSE GREATEST(0, LEAST(s.view_h, CAST(s.view_h / (d.dist * COS(d.angle - m.dir)) AS INT))) 
       END AS height 
-    FROM distances d, settings s, player p
-    WHERE p.id = d.player_id),
+    FROM distances d, settings s, players p, mobs m
+    WHERE p.id = m.id
+      AND d.player_id = p.id),
   pixels AS ( 
     SELECT 
       h.player_id,
@@ -115,127 +117,173 @@ config as (
   select 
     p.id as player_id,
     s.view_w, s.view_h, s.fov,
-    p.x as player_x, p.y as player_y, p.dir as player_dir,
-    cos(-p.dir) as cos_dir,
-    sin(-p.dir) as sin_dir,
+    m.x as player_x, m.y as player_y, m.dir as player_dir,
+    cos(-m.dir) as cos_dir,
+    sin(-m.dir) as sin_dir,
     s.view_w / (2 * tan(s.fov / 2)) as projection_factor
-  from settings s, player p
+  from settings s, players p, mobs m
+  WHERE p.id = m.id
 ),
-
--- Combine bullets and players into one stream
-entities as (
-  select id, x, y, '🔥' as icon, 'bullet' as type from bullets
-  union all
-  select id, x, y, icon, 'player' from player
-),
-
-
 -- Compute relative coordinates, depth, screen_x, etc.
-projected_entities as (
+projected_mobs as (
   select 
-    e.*,
+    m.*,
     c.*,
-    e.x - c.player_x as dx,
-    e.y - c.player_y as dy,
-    (e.x - c.player_x) * c.cos_dir - (e.y - c.player_y) * c.sin_dir as depth,
-    (e.x - c.player_x) * c.sin_dir + (e.y - c.player_y) * c.cos_dir as horizontal_offset
-  from entities e, config c
+    m.x - c.player_x as dx,
+    m.y - c.player_y as dy,
+    (m.x - c.player_x) * c.cos_dir - (m.y - c.player_y) * c.sin_dir as depth,
+    (m.x - c.player_x) * c.sin_dir + (m.y - c.player_y) * c.cos_dir as horiz
+  from mobs m, config c
 ),
 
 
 -- Project onto screen, filter invalid/behind-camera entities
-screen_entities as (
-  select *,
-    round(view_w / 2 + (horizontal_offset / depth) * projection_factor) as screen_x,
-    floor(view_h / 2) as screen_y
-  from projected_entities
-  where depth > 0.1
+screen_mobs as (
+  SELECT 
+    pm.*,
+    ROUND(pm.view_w / 2 + (pm.horiz / pm.depth) * pm.projection_factor) AS screen_x_center,
+    FLOOR(pm.view_h / 2) AS screen_y_center
+  FROM projected_mobs pm
+  WHERE pm.depth > 0.1
 ),
 
+-- Wall distances per column
 column_distances AS (
-select
-  player_id,
-  col,
-  max(dist) as dist
-from visible_tiles
-group by player_id, col
+  SELECT player_id, col, MAX(dist) AS dist
+  FROM visible_tiles
+  GROUP BY player_id, col
 ),
 
-
--- Clamp to screen and get wall depth
-clamped as (
-  select 
-    se.*,
-    greatest(0, least(view_h - 1, screen_y)) as final_y,
-    cd.dist as wall_depth
-  from screen_entities se
-  left join column_distances cd on (
-    cd.col = round(view_w / 2 + (horizontal_offset / depth) * projection_factor) 
-    and se.player_id = cd.player_id)
-  where round(view_w / 2 + (horizontal_offset / depth) * projection_factor) >= 0
-  and round(view_w / 2 + (horizontal_offset / depth) * projection_factor) between 0 and view_w - 1
-),
-
--- Select only visible entities closer than the wall
-visible_entities as (
-  select * from clamped
-  where depth < coalesce(wall_depth, 1e9)
-),
-
--- Expand entities based on depth
-scaled_entities AS (
+-- We have multiple LODs for some sprites, so we need to select the right one
+bullet_lods AS (
   SELECT
-    player_id,
-    screen_x,
-    final_y,
-    icon,
-    depth,
-    view_h,
-    view_w,
-    ceil(view_h / (depth * 8.0))::int AS radius_y,
-    ceil(view_w / (depth * 8.0))::int AS radius_x
-  FROM visible_entities
+    (SELECT id FROM sprites WHERE name = 'shot_slug_away_12x12') AS near_id,
+    (SELECT id FROM sprites WHERE name = 'shot_slug_away_6x6')  AS far_id
+),
+marine_lods AS (
+  SELECT
+    (SELECT id FROM sprites WHERE name = 'marine_outline_16x20') AS near_id,
+    (SELECT id FROM sprites WHERE name = 'marine_outline_12x15') AS mid_id,
+    (SELECT id FROM sprites WHERE name = 'marine_outline_8x10')  AS far_id
+),
+screen_mobs_lod AS (
+  SELECT
+    sm.*,
+    CASE
+      WHEN sm.kind = 'bullet' AND sm.depth > 4 THEN blod.far_id
+      WHEN sm.kind = 'player' AND sm.depth > 6 THEN ml.far_id
+      WHEN sm.kind = 'player' AND sm.depth > 3 THEN ml.mid_id
+      ELSE sm.sprite_id
+    END AS effective_sprite_id
+  FROM screen_mobs sm, bullet_lods blod, marine_lods ml
 ),
 
--- Project entity based on its size
-entity_pixels as (
-  select 
-    player_id,
-    icon,
-    depth,
-    screen_x + dx AS px,
-    final_y + dy AS py
-  from scaled_entities,
-  generate_series(-15, 15) AS dx, -- ellipse size
-  generate_series(-15, 15) AS dy
-  WHERE 
-    (dx * dx * 1.0) / (radius_x * radius_x + 0.01) +
-    (dy * dy * 1.0) / (radius_y * radius_y + 0.01) <= 1.0  -- ellipse equation
-    AND screen_x + dx >= 0 AND screen_x + dx <= view_w - 1
-    AND final_y + dy >= 0 AND final_y + dy <= view_h - 1
-),
-
--- Select the closest entity per (x, y) cell
-closest_entity_per_pixel as (
-  select distinct on (player_id, px, py)
-    player_id, px, py, icon, depth
-  from entity_pixels
-  order by player_id, px, py, depth asc
-),
-
--- Overlay entity icons
-patched_framebuffer as (
-  select 
-    fc.player_id,
-    fc.y,
-    fc.x,
-    coalesce(ce.icon, fc.ch) as ch
-  from render_3d_frame fc
-  left join closest_entity_per_pixel ce 
-    on (ce.px = fc.x and ce.py = fc.y and fc.player_id = ce.player_id)
+-- Project sprite pixels for each visible MOB
+expanded_sprite_pixels AS (
+  SELECT
+    sm.player_id,
+    sm.id AS mob_id,
+    sm.depth,
+    sm.view_w, sm.view_h,
+    sp.sx, sp.sy, sp.ch,
+    spr.w, spr.h,
+    sm.screen_x_center,
+    sm.screen_y_center,
+    (sm.projection_factor * sm.world_w / sm.depth) / spr.w AS scale_x,
+    (sm.projection_factor * sm.world_h / sm.depth) / spr.h AS scale_y
+  FROM screen_mobs_lod sm
+  JOIN sprites spr ON spr.id = sm.effective_sprite_id
+  JOIN sprite_pixels sp ON sp.sprite_id = spr.id
+  WHERE sp.ch IS NOT NULL AND sp.ch <> ' ' -- Only non-transparent pixels
 ),
 
 
+-- Convert sprite local pixel coords to screen coords (billboard centered horizontally, top-aligned)
+sprite_screen_pixels AS (
+  WITH base AS (
+    SELECT
+      esp.player_id,
+      esp.mob_id,
+      esp.depth,
+      esp.ch,
+      esp.view_w, esp.view_h,
+      esp.sx, esp.sy,
+      esp.scale_x,
+      esp.scale_y,
+      esp.screen_x_center,
+      esp.screen_y_center,
+      esp.w, esp.h,
+      -- top-left anchor of the scaled sprite
+      (esp.screen_x_center - ROUND((esp.w/2.0) * esp.scale_x))::int AS ax,
+      (esp.screen_y_center - ROUND((esp.h/2.0) * esp.scale_y))::int AS ay
+    FROM expanded_sprite_pixels esp
+  ),
+  spans AS (
+    SELECT
+      b.*,
+      -- horizontal span for this texel
+      (b.ax + FLOOR(b.sx * b.scale_x))::int AS x0_raw,
+      (b.ax + FLOOR((b.sx + 1) * b.scale_x) - 1)::int AS x1_raw,
+      -- vertical span for this texel
+      (b.ay + FLOOR(b.sy * b.scale_y))::int AS y0_raw,
+      (b.ay + FLOOR((b.sy + 1) * b.scale_y) - 1)::int AS y1_raw
+    FROM base b
+    WHERE b.ch IS NOT NULL
+  ),
+  clamped AS (
+    SELECT
+      s.player_id, s.mob_id, s.depth, s.ch, s.view_w, s.view_h,
+      GREATEST(s.x0_raw, 0)                          AS x0,
+      LEAST(GREATEST(s.x1_raw, s.x0_raw), s.view_w-1) AS x1,  -- ensure x1 >= x0 and on-screen
+      GREATEST(s.y0_raw, 0)                          AS y0,
+      LEAST(GREATEST(s.y1_raw, s.y0_raw), s.view_h-1) AS y1   -- ensure y1 >= y0 and on-screen
+    FROM spans s
+  )
+  SELECT
+    c.player_id, c.mob_id, c.depth, c.ch,
+    px AS px, py AS py
+  FROM clamped c
+  JOIN LATERAL generate_series(c.x0, c.x1) AS px ON TRUE
+  JOIN LATERAL generate_series(c.y0, c.y1) AS py ON TRUE
+),
+
+-- Keep only sprite pixels that are in front of the wall
+visible_sprite_pixels AS (
+  SELECT 
+    ssp.*,
+    cd.dist AS wall_depth
+  FROM sprite_screen_pixels ssp
+  LEFT JOIN column_distances cd
+    ON cd.player_id = ssp.player_id
+   AND cd.col = ssp.px
+   WHERE depth < COALESCE(cd.dist, 1e9)
+),
+
+-- Keep the closest MOB pixel per screen (x,y)
+closest_sprite_pixel AS (
+  SELECT DISTINCT ON (player_id, px, py)
+    player_id, px, py, ch, depth
+  FROM visible_sprite_pixels
+  ORDER BY player_id, px, py, depth ASC
+),
+
+-- Compose the base 3D frame (your existing walls/floor/ceiling)
+base_frame AS (
+  SELECT player_id, y, x, ch
+  FROM render_3d_frame
+),
+
+-- Overlay the MOB sprite pixels on top of the base frame
+patched_framebuffer AS (
+  SELECT 
+    bf.player_id,
+    bf.y,
+    bf.x,
+    COALESCE(csp.ch, bf.ch) AS ch
+  FROM base_frame bf
+  LEFT JOIN closest_sprite_pixel csp
+    ON csp.player_id = bf.player_id AND csp.px = bf.x AND csp.py = bf.y
+),
 -- Reconstruct each row from characters
 final_frame as (
   select 
@@ -266,42 +314,31 @@ tiles_to_display as (
   select player_id, tile_x, tile_y, min(tile) as tile from visible_tiles
   group by player_id, tile_x, tile_y
 ),
--- Step 3: Draw bullets ('*')
-bullets_overlay as (
-  select 
+-- Generic MOB overlay, only where tile is visible
+mobs_overlay AS (
+  SELECT 
     t.player_id,
-    floor(x)::int as x,
-    floor(y)::int as y,
-    '🔥' as ch
-  from bullets b, tiles_to_display t
-  where floor(x)::int = t.tile_x and floor(y)::int = t.tile_y -- only for tiles that are visible
-),
--- Step 5: Draw player (single row)
-player_overlay as (
-  select
-    t.player_id,
-    floor(x)::int as x,
-    floor(y)::int as y,
-    icon as ch
-  from player, tiles_to_display t
-  where floor(x)::int = t.tile_x and floor(y)::int = t.tile_y -- only for tiles that are visible
+    FLOOR(m.x)::int AS x,
+    FLOOR(m.y)::int AS y,
+    COALESCE(m.minimap_icon, '·') AS ch
+  FROM mobs m
+  JOIN tiles_to_display t 
+    ON FLOOR(m.x)::int = t.tile_x AND FLOOR(m.y)::int = t.tile_y
 ),
 -- Step 6: Combine overlays in draw order (player > bullet > tile)
 combined as (
   select pl.id as player_id, g.x, g.y,
     coalesce(
-      p.ch,
-      b.ch,
+      mo.ch,
       t.tile,
       case when base.tile = '.' then ' ' -- erase tiles outside LOS
            else base.tile end,
       ' '
     ) as ch
-  from grid g, player pl
+  from grid g, players pl
   left join map base on g.x = base.x and g.y = base.y
   left join tiles_to_display t on g.x = t.tile_x and g.y = t.tile_y and pl.id = t.player_id
-  left join bullets_overlay b on g.x = b.x and g.y = b.y and pl.id = b.player_id
-  left join player_overlay p on g.x = p.x and g.y = p.y and pl.id = p.player_id
+  left join mobs_overlay mo on g.x = mo.x and g.y = mo.y and pl.id = mo.player_id
 ),
 -- Step 7: Reconstruct lines
 lines as (
@@ -323,9 +360,10 @@ with minimap as (
 ),
 player_lines as (
   select 
-    row_number() over () - 1 as y, 
-    id || ': ' || name || ' (' || icon || ') score: ' || score  as player_row
-  from player
+    row_number() over (order by p.id) - 1 as y, 
+    p.id || ': ' || m.name || ' (' || m.minimap_icon || ') score: ' || p.score  as player_row
+  from players p, mobs m
+  where p.id = m.id
 ),
 
 -- Step 2: Your 3D framebuffer rows (from the 3D render)
