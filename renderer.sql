@@ -320,7 +320,7 @@ mobs_overlay AS (
     t.player_id,
     FLOOR(m.x)::int AS x,
     FLOOR(m.y)::int AS y,
-    COALESCE(m.minimap_icon, '·') AS ch
+    COALESCE(m.minimap_icon, '?') AS ch
   FROM mobs m
   JOIN tiles_to_display t 
     ON FLOOR(m.x)::int = t.tile_x AND FLOOR(m.y)::int = t.tile_y
@@ -330,8 +330,8 @@ combined as (
   select pl.id as player_id, g.x, g.y,
     coalesce(
       mo.ch,
-      t.tile,
-      case when base.tile = '.' then ' ' -- erase tiles outside LOS
+      case when t.tile = 'R' then '.' else t.tile end, -- Hide spawn points
+      case when base.tile = '.' or base.tile = 'R' then ' ' -- erase tiles outside LOS and hide spawn points
            else base.tile end,
       ' '
     ) as ch
@@ -353,36 +353,114 @@ lines as (
 select *
 from lines;
 
-create or replace view screen as 
-with minimap as (
-  select player_id, y, row as minimap_row
-  from minimap
-),
-player_lines as (
-  select 
-    row_number() over (order by p.id) - 1 as y, 
-    p.id || ': ' || m.name || ' (' || m.minimap_icon || ') score: ' || p.score  as player_row
-  from players p, mobs m
-  where p.id = m.id
+CREATE OR REPLACE VIEW screen AS
+WITH
+-- Raw minimap rows from table `minimap`
+mm AS (
+  SELECT player_id, y, row
+  FROM minimap
 ),
 
--- Step 2: Your 3D framebuffer rows (from the 3D render)
-gameview as (
-  select player_id, y, row as view_row
-  from game_view
+-- Per-player minimap dims
+mm_dims AS (
+  SELECT
+         MAX(LENGTH(row)) AS mm_w,
+         MAX(y)           AS y_max
+  FROM mm
 ),
 
--- Step 3: Pad minimap to fixed width, concat with game view
-combined as (
-  select 
-    g.player_id,
-    coalesce(m.y, g.y) as y,
-    rpad(coalesce(g.view_row, ''), 128, ' ') || '   ' || coalesce(m.minimap_row, '')  || '   ' || coalesce(p.player_row, '') as full_row --map width
-  from minimap m
-  full outer join player_lines p on m.y = p.y
-  full outer join gameview g on (m.y = g.y and m.player_id = g.player_id)
+
+-- Frame the 3D game view with borders
+gameview_lines AS (
+  SELECT g.player_id,
+         g.y,
+         '║' || rpad(g.row, view_w, ' ') || '║' AS view_col
+  FROM game_view g, settings s
+),
+gameview_frame AS (
+  SELECT p.id as player_id, -1 AS y, '╔' || repeat('═', view_w) || '╗' AS view_col FROM players p, settings s
+  UNION ALL
+  SELECT * FROM gameview_lines
+  UNION ALL
+  SELECT p.id as player_id, s.view_w + 1 AS y, '╚' || repeat('═', view_w) || '╝' AS view_col FROM players p, settings s
+),
+
+-- Frame the minimap (auto width per player) with borders
+minimap_lines AS (
+  SELECT m.player_id,
+         m.y,
+         '║' || rpad(m.row, md.mm_w, ' ') || '║' AS mm_col
+  FROM mm m, mm_dims md
+),
+minimap_frame AS (
+  SELECT p.id as player_id, -1 AS y, '╔' || repeat('═', md.mm_w) || '╗' AS mm_col FROM mm_dims md, players p
+  UNION ALL
+  SELECT * FROM minimap_lines
+  UNION ALL
+  SELECT p.id as player_id, md.y_max + 1 AS y, '╚' || repeat('═', md.mm_w) || '╝' AS mm_col FROM mm_dims md, players p
+),
+
+-- Global player HUD lines (ALL players): name, score, HP bar, bullets
+player_lines AS (
+  SELECT
+    row_number() OVER (ORDER BY p.id) - 1 AS y,
+    (
+      p.id || ': ' || rpad(m.name, 10, ' ') || ' (' || m.minimap_icon || ') '
+      || 'score: ' || p.score || '   '
+      || 'HP: [' ||
+         repeat('█', GREATEST(0, LEAST(20, ROUND(20 * GREATEST(0, LEAST(p.hp,100))::numeric / 100)::int))) ||
+         repeat(' ', GREATEST(0, 20 - ROUND(20 * GREATEST(0, LEAST(p.hp,100))::numeric / 100)::int)) ||
+         '] ' || GREATEST(0, p.hp) || '   '
+      || 'AMMO: ' ||
+        repeat('•', COALESCE(p.ammo,0))
+    ) AS player_row
+  FROM players p
+  JOIN mobs m ON p.id = m.id
+),
+
+-- Number of HUD rows (max y of HUD)
+hud_dims AS (
+  SELECT MAX(y) AS hud_max_y FROM player_lines
+),
+
+-- Build a per-viewer row index covering frames and the HUD height
+bounds AS (
+  SELECT
+    p.id as player_id,
+    GREATEST(
+      s.view_h + 1,  -- account for bottom border in gameview
+      md.y_max + 1,  -- account for bottom border in minimap
+      hd.hud_max_y   -- HUD rows are 0..hud_max_y
+    ) AS y_top
+  FROM players p, settings s, mm_dims md, hud_dims hd
+),
+row_index AS (
+  SELECT b.player_id, gs.y
+  FROM bounds b
+  JOIN LATERAL generate_series(-1, b.y_top) AS gs(y) ON TRUE
+),
+
+-- Attach the framed columns to the row index (per viewer)
+frames_by_row AS (
+  SELECT
+    ri.player_id,
+    ri.y,
+    gv.view_col,
+    mf.mm_col
+  FROM row_index ri
+  LEFT JOIN gameview_frame gv
+    ON gv.player_id = ri.player_id AND gv.y = ri.y
+  LEFT JOIN minimap_frame mf
+    ON mf.player_id = ri.player_id AND mf.y = ri.y
 )
 
--- Step 4: Final joined output
-select player_id, y, full_row
-from combined;
+-- Final: each viewer sees their own frames + the full global HUD
+SELECT
+  f.player_id,
+  f.y,
+  COALESCE(f.view_col, repeat(' ', s.view_w + 2)) || '   ' ||
+  COALESCE(f.mm_col,  repeat(' ', COALESCE(md.mm_w, 0) + 2)) || '   ' ||
+  COALESCE(pl.player_row, '') AS full_row
+FROM frames_by_row f
+LEFT JOIN player_lines pl ON pl.y = f.y, mm_dims md, settings s
+ORDER BY f.player_id, f.y;

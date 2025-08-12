@@ -136,9 +136,22 @@ AND p.hp <= 0;
 
 COMMIT;
 
+
+WITH d AS (
+  SELECT
+    p.id,
+    -- how many bullets should we refill?
+    FLOOR((EXTRACT(EPOCH FROM (now())) - p.last_ammo_refill) / c.ammo_refill_interval_seconds)::int AS steps,
+  FROM players p, config c
+  WHERE p.ammo != c.ammo_max
+)
+UPDATE players p
+SET
+  ammo = GREATEST(0, LEAST(c.ammo_max, p.ammo + d.steps)),
+  last_ammo_refill = EXTRACT(EPOCH FROM (now()))::int
+FROM d, config c
+WHERE p.id = d.id
+  AND d.steps > 0;
+
 -- Remove all processed inputs
 UPDATE inputs i SET action = '';
-
-
-
--- Refill bullets

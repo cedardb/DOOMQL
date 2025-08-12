@@ -4,9 +4,11 @@ alter user postgres with password 'postgres';
 DROP TABLE IF EXISTS config;
 CREATE TABLE config(
   player_move_speed NUMERIC DEFAULT 0.3, 
-  player_turn_speed NUMERIC DEFAULT 0.2);
+  player_turn_speed NUMERIC DEFAULT 0.2,
+  ammo_max INT DEFAULT 10,
+  ammo_refill_interval_seconds INT DEFAULT 2);
 
-insert into config (player_move_speed, player_turn_speed) values (0.3, 0.2);
+insert into config (player_move_speed, player_turn_speed, ammo_max, ammo_refill_interval_seconds) values (0.3, 0.2, 10, 2);
 
 -- MAP
 DROP TABLE IF EXISTS map;
@@ -63,7 +65,8 @@ CREATE TABLE IF NOT EXISTS players (
   id INT REFERENCES mobs(id),
   score INT DEFAULT 0,
   hp INT DEFAULT 100,
-  ammo INT DEFAULT 10
+  ammo INT DEFAULT 10,
+  last_ammo_refill int default EXTRACT(EPOCH FROM (now()))::int
 );
 
 -- COLLISIONS BETWEEN BULLETS AND PLAYERS
