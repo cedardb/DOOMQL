@@ -8,7 +8,7 @@ DB_PORT="5432"
 export PGPASSWORD="postgres"
 
 # Load the game state
-psql -qtAX -h /tmp -U postgres -c '\timing' -f gamestate.sql
+psql -qtAX -U "$DB_USER" -d "$DB_NAME" -h "$DB_HOST" -p "$DB_PORT" -c '\timing' -f gamestate.sql
 
 # Load the renderer
 psql -qtAX -U "$DB_USER" -d "$DB_NAME" -h "$DB_HOST" -p "$DB_PORT" '\timing' -f renderer.sql

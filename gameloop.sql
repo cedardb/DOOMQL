@@ -136,7 +136,7 @@ AND p.hp <= 0;
 
 COMMIT;
 
-
+-- Periodically refill players' ammo
 WITH d AS (
   SELECT
     p.id,

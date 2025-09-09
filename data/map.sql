@@ -4,7 +4,7 @@ WITH params AS (
   SELECT 64::int AS w, 32::int AS h
 ),
 
--- Full grid (defaults to walls) ------------------------------------------
+-- Full grid (defaults to walls) 
 grid AS (
   SELECT x, y
   FROM params p,
@@ -12,7 +12,7 @@ grid AS (
        generate_series(0, p.h - 1) AS y
 ),
 
--- Rectangles to carve as FLOOR (rooms + corridors) -----------------------
+-- Rectangles to carve as FLOOR (rooms + corridors)
 -- Format: (x1,y1,x2,y2), all inclusive; corridors are just skinny rects (>= 2 wide)
 areas AS (
   SELECT * FROM (VALUES
@@ -49,7 +49,7 @@ room_boxes AS (
   WHERE (x2 - x1 + 1) >= 6 AND (y2 - y1 + 1) >= 6
 ),
 
--- One respawn at the center of each room (floored to integer coords)
+-- One respawn at the center of each room
 respawns AS (
   SELECT floor((x1 + x2) / 2.0)::int AS x,
          floor((y1 + y2) / 2.0)::int AS y

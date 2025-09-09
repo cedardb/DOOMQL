@@ -10,7 +10,7 @@ from psycopg2 import errors
 DB_NAME = "postgres"
 DB_USER = "postgres"
 DB_PASSWORD = "postgres"
-DB_HOST = "chiletanne"
+DB_HOST = "localhost"
 DB_PORT = "5432"
 
 FRAME_INTERVAL = 0.05  # ~20 FPS
@@ -97,7 +97,7 @@ def main():
         conn = connect_db()
         conn.autocommit = True
         cur = conn.cursor()
-
+        cur.execute("SET implicit_cross_products = ON")
         player_id = get_or_create_player(cur, name, icon)
         viewer_id = player_id  # start by watching yourself
         clear()
