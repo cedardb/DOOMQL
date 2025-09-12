@@ -11,7 +11,7 @@ export PGPASSWORD="postgres"
 psql -qtAX -U "$DB_USER" -d "$DB_NAME" -h "$DB_HOST" -p "$DB_PORT" -c '\timing' -f gamestate.sql
 
 # Load the renderer
-psql -qtAX -U "$DB_USER" -d "$DB_NAME" -h "$DB_HOST" -p "$DB_PORT" '\timing' -f renderer.sql
+psql -qtAX -U "$DB_USER" -d "$DB_NAME" -h "$DB_HOST" -p "$DB_PORT" -c '\timing' -f renderer.sql
 
 # Load custom data
 for file in data/*; do
