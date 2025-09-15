@@ -8,7 +8,7 @@ A multiplayer DOOM-like shooter implemented entirely in SQL, powered by CedarDB.
 
 You read that right, *everything* is written in SQL: The renderer, the game loop, and the multiplayer sync.
 
-This porject started as a thought experiment. Could we take [DuckDB DOOM](https://github.com/patricktrainer/duckdb-doom) and crank it up to 11? Bigger viewport, more FPS, sprites, multiplayer support, while doing *everything* in SQL? Turns out, we can.
+This project started as a thought experiment. Could we take [DuckDB DOOM](https://github.com/patricktrainer/duckdb-doom) and crank it up to 11? Bigger viewport, more FPS, sprites, multiplayer support, while doing *everything* in SQL? Turns out, we can.
 
 ## Features
 * **Pure SQL renderer:** Raycasting, sprite projection, occlusion, and HUD, all implemented as `VIEWS`.
