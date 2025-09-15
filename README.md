@@ -10,6 +10,9 @@ You read that right, *everything* is written in SQL: The renderer, the game loop
 
 This project started as a thought experiment. Could we take [DuckDB DOOM](https://github.com/patricktrainer/duckdb-doom) and crank it up to 11? Bigger viewport, more FPS, sprites, multiplayer support, while doing *everything* in SQL? Turns out, we can.
 
+## Blog
+Read more details about DOOMQL in [this blog post](https://cedardb.com/blog/doomql).
+
 ## Features
 * **Pure SQL renderer:** Raycasting, sprite projection, occlusion, and HUD, all implemented as `VIEWS`.
 * **Multiplayer:** CedarDB handles concurrent players, synchronization, and state.
