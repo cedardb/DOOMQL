@@ -1,56 +1,62 @@
--- We start by casting a ray for each column of the player's view. 
+-- We start by casting a ray for each column of the player's view.
 -- We get away with only using columns (and not also rows)
--- because the game is 2.5D: There is nothing happening at half height, 
+-- because the game is 2.5D: There is nothing happening at half height,
 -- except for sprites which are rendered separately anyway.
 CREATE OR REPLACE VIEW rays AS
-WITH cols AS ( 
+WITH cols AS (
   -- For each column ...
     SELECT pc.col FROM settings s, generate_series(0, s.view_w) as pc(col)
   )
 SELECT p.id as player_id, -- ... and each player ...
-  m.x AS player_x, 
+  m.x AS player_x,
   m.y AS player_y,
-  c.col, 
+  c.col,
   -- ... calculate the angle of the ray relative to the player's direction
-  (m.dir - s.fov/2.0 + s.fov * (c.col*1.0 / (s.view_w - 1))) AS angle 
-FROM cols c, settings s, players p, mobs m
-WHERE p.id = m.id;
+  (m.dir - s.fov/2.0 + s.fov * (c.col*1.0 / (s.view_w - 1))) AS angle
+FROM cols c
+CROSS JOIN settings s
+CROSS JOIN players p
+JOIN mobs m ON p.id = m.id;
 
--- Next, we calculate for all players, which tiles are visible 
+-- Next, we calculate for all players, which tiles are visible
 -- from their current position and orientation using the rays we've
 -- calculated before.
-CREATE OR REPLACE VIEW visible_tiles AS 
-WITH RECURSIVE raytrace AS ( 
-  -- The heart of our algorithm. 
-    SELECT 
+CREATE OR REPLACE VIEW visible_tiles AS
+WITH RECURSIVE raytrace AS (
+  -- The heart of our algorithm.
+    SELECT
       -- Starting at the player's eye ...
       r.player_id,
-      r.col, 
-      1 as step_count, 
-      r.player_x + COS(r.angle)*s.step as fx, 
-      r.player_y + SIN(r.angle)*s.step as fy, 
+      r.col,
+      1 as step_count,
+      r.player_x + COS(r.angle)*s.step as fx,
+      r.player_y + SIN(r.angle)*s.step as fy,
       r.angle,
-      0 as dist
-    FROM rays r, settings s 
-    UNION ALL 
+      0::double precision as dist
+    FROM rays r
+    CROSS JOIN settings s
+
+    UNION ALL
+
     SELECT
       -- ... we recursively march along the rays, 1 "step" at a time ...
-      rt.player_id as player_id, 
-      rt.col as col, 
-      rt.step_count + 1 as step_count, 
-      rt.fx + COS(rt.angle)*s.step as fx, 
-      rt.fy + SIN(rt.angle)*s.step as fy, 
+      rt.player_id as player_id,
+      rt.col as col,
+      rt.step_count + 1 as step_count,
+      rt.fx + COS(rt.angle)*s.step as fx,
+      rt.fy + SIN(rt.angle)*s.step as fy,
       rt.angle,
       step_count * s.step * COS(rt.angle - m.dir) as dist
-    FROM raytrace rt, settings s, players p, mobs m
+    FROM settings s
+    CROSS JOIN raytrace rt
+    JOIN players p ON p.id = rt.player_id
+    JOIN mobs m ON m.id = p.id
     WHERE rt.step_count < s.max_steps -- ... stopping after our max render distance
-      AND rt.player_id = p.id
-      AND m.id = p.id
       AND NOT EXISTS ( -- or if we hit a wall
-        SELECT 1 
-        FROM map m 
-        WHERE m.x = CAST(rt.fx AS INT) 
-          AND m.y = CAST(rt.fy AS INT) 
+        SELECT 1
+        FROM map m
+        WHERE m.x = CAST(rt.fx AS INT)
+          AND m.y = CAST(rt.fy AS INT)
           AND m.tile = '#') -- Wall
     )
   SELECT DISTINCT
@@ -64,31 +70,32 @@ WITH RECURSIVE raytrace AS (
     CAST(rt.fy AS INT) AS tile_y,
     col,
     min(dist) as dist -- We might hit the same tile multiple times, so we take the closest hit
-  FROM raytrace rt, map m
-  where m.x = CAST(rt.fx AS INT) 
-    AND m.y = CAST(rt.fy AS INT) 
+  FROM raytrace rt
+  JOIN map m ON m.x = CAST(rt.fx AS INT) AND m.y = CAST(rt.fy AS INT)
   GROUP BY tile_x, tile_y, m.tile, col, player_id;
 
 -- Render the 3D viewport for each player. Ignore mobs for now.
 CREATE OR REPLACE VIEW render_3d_frame AS
 WITH
   -- Generate the columns and rows of the viewport, i.e. all the pixels we have to render
-  cols AS ( 
-    SELECT pc.col FROM settings s, generate_series(0, s.view_w) as pc(col)
+  cols AS (
+    SELECT pc.col
+    FROM settings s
+    CROSS JOIN generate_series(0, s.view_w) as pc(col)
   ),
   rows_gen AS ( -- "rows" is already a keyword in SQL :(
-    SELECT pr.row FROM settings s, generate_series(0, s.view_h) as pr(row)
+    SELECT pr.row FROM settings s
+    CROSS JOIN generate_series(0, s.view_h) as pr(row)
   ),
-  visible_walls AS ( 
+  visible_walls AS (
     -- Which walls are visible for each player, i.e. not occluded by another wall?
-    SELECT 
+    SELECT
       player_id,
-      vt.col, 
-      min(dist) as dist, -- i.e., the first wall we hit
-    FROM map m, visible_tiles vt
-    where vt.tile_x = m.x 
-      AND vt.tile_y = m.y 
-      AND m.tile = '#'
+      vt.col,
+      min(dist) as dist -- i.e., the first wall we hit
+    FROM map m
+    JOIN visible_tiles vt ON vt.tile_x = m.x AND vt.tile_y = m.y
+    WHERE m.tile = '#'
     GROUP BY player_id, vt.col
   ),
   distances AS (
@@ -97,70 +104,78 @@ WITH
       r.col,
       r.angle,
       coalesce(v.dist, s.max_steps * s.step) as dist
-    from settings s, rays r left join visible_walls v on r.col = v.col and r.player_id = v.player_id
+    FROM settings s
+    CROSS JOIN rays r
+    LEFT JOIN visible_walls v ON r.col = v.col AND r.player_id = v.player_id
   ),
-  heights AS ( 
-    -- Even though all walls have the same height, their height on the screen depends on the distance. 
+  heights AS (
+    -- Even though all walls have the same height, their height on the screen depends on the distance.
     -- Calculate the height of all visible walls for all players.
-    SELECT 
-      p.id as player_id, 
-      d.col, 
-      CASE WHEN d.dist <= 0 
-        THEN s.view_h 
-        ELSE GREATEST(0, LEAST(s.view_h, CAST(s.view_h / (d.dist * COS(d.angle - m.dir)) AS INT))) 
-      END AS height 
-    FROM distances d, settings s, players p, mobs m
-    WHERE p.id = m.id
-      AND d.player_id = p.id),
-  pixels AS ( 
+    SELECT
+      p.id as player_id,
+      d.col,
+      CASE WHEN d.dist <= 0
+        THEN s.view_h
+        ELSE GREATEST(0, LEAST(s.view_h, CAST(s.view_h / (d.dist * COS(d.angle - m.dir)) AS INT)))
+      END AS height
+    FROM settings s
+    CROSS JOIN distances d
+    JOIN players p ON p.id = d.player_id
+    JOIN mobs m ON m.id = p.id
+  ),
+  pixels AS (
     -- We can finally render all the pixels!
-    SELECT 
+    SELECT
       h.player_id,
-      c.col AS x, 
-      rg.row AS y, 
+      c.col AS x,
+      rg.row AS y,
       CASE WHEN rg.row < (s.view_h - h.height) / 2 THEN ' '  -- Sky
         WHEN rg.row >= (s.view_h + h.height) / 2 THEN '.' -- Floor
         WHEN d.dist < s.max_steps * s.step / 4 THEN '█' -- Close wall
         WHEN d.dist < s.max_steps * s.step * 2 / 4 THEN '▓' -- Mid wall
         WHEN d.dist < s.max_steps * s.step * 3 / 4 THEN '▒' -- Far wall
         ELSE '░' END AS ch -- Very far wall
-      FROM cols c, rows_gen rg, settings s, heights h, distances d
-      WHERE c.col = h.col
-      AND h.player_id = d.player_id
-      AND c.col = d.col)
+      FROM cols c
+      JOIN heights h ON c.col = h.col
+      JOIN distances d ON h.player_id = d.player_id AND h.col = d.col
+      CROSS JOIN rows_gen rg
+      CROSS JOIN settings s)
 SELECT player_id, x, y, ch FROM pixels ORDER BY y, x;
 
 -- Now the real fun begins: The full 3D frame including all entities
-CREATE OR REPLACE VIEW game_view as 
-with 
+CREATE OR REPLACE VIEW game_view as
+WITH
 -- Gather settings and player info we need multiple times, once
 config as (
-  select 
+  SELECT
     p.id as player_id,
-    m.x as player_x, 
-    m.y as player_y, 
+    m.x as player_x,
+    m.y as player_y,
     m.dir as player_dir,
     s.view_w / (2 * tan(s.fov / 2)) as projection_factor
-  from settings s, players p, mobs m
-  WHERE p.id = m.id
+  FROM settings s
+  CROSS JOIN players p
+  JOIN mobs m ON p.id = m.id
 ),
 -- Compute relative coordinates, depth, screen_x, etc.
 projected_mobs as (
-  select 
+  SELECT
     c.player_id,
     m.*,
     (m.x - c.player_x) * cos(-c.player_dir) - (m.y - c.player_y) * sin(-c.player_dir) as depth,
     (m.x - c.player_x) * sin(-c.player_dir) + (m.y - c.player_y) * cos(-c.player_dir) as horiz
-  from mobs m, config c
+  FROM mobs m
+  CROSS JOIN config c
 ),
-
 -- Project all visible mobs onto screen, filtering behind-camera entities
 screen_mobs as (
-  SELECT 
+  SELECT
     pm.*,
     ROUND(s.view_w / 2 + (pm.horiz / pm.depth) * c.projection_factor) AS screen_x_center,
     ROUND(s.view_h / 2) AS screen_y_center -- Center vertically
-  FROM projected_mobs pm, settings s, config c
+  FROM projected_mobs pm
+  CROSS JOIN settings s
+  CROSS JOIN config c
   WHERE pm.depth > 0.1
 ),
 
@@ -194,7 +209,9 @@ screen_mobs_lod AS (
       WHEN sm.kind = 'player' AND sm.depth > 3 THEN ml.mid_id
       ELSE sm.sprite_id
     END AS effective_sprite_id
-  FROM screen_mobs sm, bullet_lods blod, marine_lods ml
+  FROM screen_mobs sm
+  CROSS JOIN bullet_lods blod
+  CROSS JOIN marine_lods ml
 ),
 
 -- Project sprite pixels for each visible MOB
@@ -261,7 +278,7 @@ sprite_screen_pixels AS (
 
 -- Keep only sprite pixels that are in front of the wall
 visible_sprite_pixels AS (
-  SELECT 
+  SELECT
     ssp.*,
     cd.dist AS wall_depth
   FROM sprite_screen_pixels ssp
@@ -280,7 +297,7 @@ closest_sprite_pixel AS (
 ),
 -- Overlay the MOB sprite pixels on top of the base frame
 patched_framebuffer AS (
-  SELECT 
+  SELECT
     bf.player_id,
     bf.y,
     bf.x,
@@ -290,75 +307,76 @@ patched_framebuffer AS (
     ON csp.player_id = bf.player_id AND csp.px = bf.x AND csp.py = bf.y
 ),
 -- Reconstruct each row from characters
-final_frame as (
-  select 
+final_frame AS (
+  SELECT
     player_id,
     y,
-    string_agg(ch, '' order by x) as row
-  from patched_framebuffer
-  group by player_id, y
+    string_agg(ch, '' ORDER BY x) as row
+  FROM patched_framebuffer
+  GROUP BY player_id, y
 )
 -- Now we have our final game view!
-select * from final_frame order by y;
+select * from final_frame ORDER BY y;
 
 
 --- Let's render our minimap
 
 CREATE OR REPLACE VIEW minimap AS
-
 -- Find the bounding box, we don't want to allow just rectangular maps
-with dimensions as ( 
-  select max(x) as max_x, max(y) as max_y from map
+with dimensions AS (
+  SELECT max(x) as max_x, max(y) as max_y FROM map
 ),
 -- Render the bounding box
-with grid as (  
-  select x, y
-  from dimensions d,
-       generate_series(0, d.max_x) as x,
-       generate_series(0, d.max_y) as y
+grid AS (
+  SELECT x, y
+  FROM dimensions d
+  CROSS JOIN generate_series(0, d.max_x) as x
+  CROSS JOIN generate_series(0, d.max_y) as y
 ),
--- Get all tiles visible per player 
-tiles_to_display as (
-  select player_id, tile_x, tile_y, min(tile) as tile from visible_tiles
-  group by player_id, tile_x, tile_y
+-- Get all tiles visible per player
+tiles_to_display AS (
+  SELECT player_id, tile_x, tile_y, min(tile) as tile
+  FROM visible_tiles
+  GROUP BY player_id, tile_x, tile_y
 ),
 -- MOB overlay, only where tile is visible
 mobs_overlay AS (
-  SELECT 
+  SELECT
     t.player_id,
     FLOOR(m.x)::int AS x,
     FLOOR(m.y)::int AS y,
     COALESCE(m.minimap_icon, '?') AS ch -- Fallback: '?' for mobs without icon
   FROM mobs m
-  JOIN tiles_to_display t 
+  JOIN tiles_to_display t
     ON FLOOR(m.x)::int = t.tile_x AND FLOOR(m.y)::int = t.tile_y
 ),
 -- Combine overlays in draw order
-combined as (
-  select pl.id as player_id, g.x, g.y,
+combined AS (
+  SELECT pl.id AS player_id, g.x, g.y,
     coalesce(
       mo.ch,
-      case when t.tile = 'R' then '.' else t.tile end, -- Hide spawn points
-      case when base.tile = '.' or base.tile = 'R' then ' ' -- show tiles outside LOS as ' '
-           else base.tile end,
+      CASE WHEN t.tile = 'R' THEN '.' ELSE t.tile END, -- Hide spawn points
+      CASE WHEN base.tile = '.' OR base.tile = 'R' THEN ' ' -- show tiles outside LOS as ' '
+           ELSE base.tile END,
       ' '
     ) as ch
-  from grid g, players pl
-  left join map base on g.x = base.x and g.y = base.y
-  left join tiles_to_display t on g.x = t.tile_x and g.y = t.tile_y and pl.id = t.player_id
-  left join mobs_overlay mo on g.x = mo.x and g.y = mo.y and pl.id = mo.player_id
+  FROM players pl
+  CROSS JOIN grid g
+  LEFT JOIN map base ON g.x = base.x AND g.y = base.y
+  LEFT JOIN tiles_to_display t ON g.x = t.tile_x AND g.y = t.tile_y AND pl.id = t.player_id
+  LEFT JOIN mobs_overlay mo ON g.x = mo.x AND g.y = mo.y AND pl.id = mo.player_id
 ),
 -- Reconstruct lines
-lines as (
-  select 
+lines AS (
+  SELECT
     player_id,
     y,
-    string_agg(ch, '' order by x) as row
-  from combined
-  group by player_id, y
+    string_agg(ch, '' ORDER BY x) as row
+  FROM combined
+  GROUP BY player_id, y
 )
-select *
-from lines;
+SELECT *
+FROM lines;
 
 -- Finally, let's combine everything into a nice screen for each player, using fancy borders.
 CREATE OR REPLACE VIEW screen AS
@@ -380,28 +398,48 @@ gameview_lines AS (
   SELECT g.player_id,
          g.y,
          '║' || rpad(g.row, view_w, ' ') || '║' AS view_col
-  FROM game_view g, settings s
+  FROM game_view g
+  CROSS JOIN settings s
 ),
 gameview_frame AS (
-  SELECT p.id as player_id, -1 AS y, '╔' || repeat('═', view_w) || '╗' AS view_col FROM players p, settings s
+  SELECT p.id as player_id, -1 AS y, '╔' || repeat('═', view_w) || '╗' AS view_col
+  FROM players p
+  CROSS JOIN settings s
+
   UNION ALL
-  SELECT * FROM gameview_lines
+
+  SELECT *
+  FROM gameview_lines
+
   UNION ALL
-  SELECT p.id as player_id, s.view_w + 1 AS y, '╚' || repeat('═', view_w) || '╝' AS view_col FROM players p, settings s
+
+  SELECT p.id as player_id, s.view_w + 1 AS y, '╚' || repeat('═', view_w) || '╝' AS view_col
+  FROM players p
+  CROSS JOIN settings s
 ),
 -- Frame the minimap with borders
 minimap_lines AS (
   SELECT m.player_id,
          m.y,
          '║' || rpad(m.row, md.mm_w, ' ') || '║' AS mm_col
-  FROM mm m, mm_dims md
+  FROM mm m
+  CROSS JOIN mm_dims md
 ),
 minimap_frame AS (
-  SELECT p.id as player_id, -1 AS y, '╔' || repeat('═', md.mm_w) || '╗' AS mm_col FROM mm_dims md, players p
+  SELECT p.id as player_id, -1 AS y, '╔' || repeat('═', md.mm_w) || '╗' AS mm_col
+  FROM mm_dims md
+  CROSS JOIN players p
+
   UNION ALL
-  SELECT * FROM minimap_lines
+
+  SELECT *
+  FROM minimap_lines
+
   UNION ALL
-  SELECT p.id as player_id, md.y_max + 1 AS y, '╚' || repeat('═', md.mm_w) || '╝' AS mm_col FROM mm_dims md, players p
+
+  SELECT p.id as player_id, md.y_max + 1 AS y, '╚' || repeat('═', md.mm_w) || '╝' AS mm_col
+  FROM mm_dims md
+  CROSS JOIN players p
 ),
 -- Build the HUD: name, score, HP bar, bullets
 player_lines AS (
@@ -423,7 +461,8 @@ player_lines AS (
 
 -- Number of HUD rows (max y of HUD)
 hud_dims AS (
-  SELECT MAX(y) AS hud_max_y FROM player_lines
+  SELECT MAX(y) AS hud_max_y
+  FROM player_lines
 ),
 
 -- Build a per-viewer row index covering frames and the HUD height
@@ -435,7 +474,10 @@ bounds AS (
       md.y_max + 1,  -- account for bottom border in minimap
       hd.hud_max_y   -- HUD rows are 0..hud_max_y
     ) AS y_top
-  FROM players p, settings s, mm_dims md, hud_dims hd
+  FROM players p
+  CROSS JOIN settings s
+  CROSS JOIN mm_dims md
+  CROSS JOIN hud_dims hd
 ),
 row_index AS (
   SELECT b.player_id, gs.y

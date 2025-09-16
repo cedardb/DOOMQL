@@ -26,7 +26,7 @@ expanded AS (
     a.sprite_id,
     x % 12 as sx,
     x / 12 as sy,
-    SUBSTRING(a.line FROM sx+1 FOR 1) AS raw_ch
+    SUBSTRING(a.line FROM (x % 12)+1 FOR 1) AS raw_ch
   FROM generate_series(0, 12 * 12) x, art a
   WHERE a.sy = x / 12
 )
@@ -57,7 +57,7 @@ expanded AS (
     a.sprite_id,
     x % 6 as sx,
     x / 6 as sy,
-    SUBSTRING(a.line FROM sx+1 FOR 1) AS raw_ch
+    SUBSTRING(a.line FROM (x % 6)+1 FOR 1) AS raw_ch
   FROM generate_series(0, 6 * 6) x, art a
   WHERE a.sy = x / 6
 )

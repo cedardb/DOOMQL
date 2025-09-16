@@ -23,7 +23,7 @@ CREATE TABLE inputs(
 
 -- Settings for the renderer
 DROP TABLE IF EXISTS settings;
-CREATE TABLE settings(fov DOUBLE, step DOUBLE, max_steps INT, view_w INT, view_h INT);
+CREATE TABLE settings(fov DOUBLE PRECISION, step DOUBLE PRECISION, max_steps INT, view_w INT, view_h INT);
 INSERT INTO settings VALUES (PI()/3, 0.1, 100, 128, 64);
 
 -- A catalog of all sprites used in the game
@@ -52,8 +52,8 @@ CREATE TABLE IF NOT EXISTS mobs (
   x DOUBLE PRECISION NOT NULL,
   y DOUBLE PRECISION NOT NULL,
   dir DOUBLE PRECISION DEFAULT 0,
-  world_w double default 1, -- width in world tiles
-  world_h double default 1, -- height in world tiles
+  world_w DOUBLE PRECISION default 1, -- width in world tiles
+  world_h DOUBLE PRECISION default 1, -- height in world tiles
   name TEXT,
   sprite_id INT REFERENCES sprites(id),
   minimap_icon TEXT

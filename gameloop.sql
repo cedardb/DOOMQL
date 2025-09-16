@@ -141,7 +141,7 @@ WITH d AS (
   SELECT
     p.id,
     -- how many bullets should we refill?
-    FLOOR((EXTRACT(EPOCH FROM (now())) - p.last_ammo_refill) / c.ammo_refill_interval_seconds)::int AS steps,
+    FLOOR((EXTRACT(EPOCH FROM (now())) - p.last_ammo_refill) / c.ammo_refill_interval_seconds)::int AS steps
   FROM players p, config c
   WHERE p.ammo != c.ammo_max
 )
